@@ -202,7 +202,7 @@ static int extract_tar_from_mem(const uint8_t *data, size_t len, const char *out
 }
 
 // ---------- CBC и CTR (однопоточные) ----------
-static void cbc_encrypt_stream(FILE *fin, FILE *fout, const uint8_t key[BLOCK_BYTES], size_t total, int quiet) {
+/*static void cbc_encrypt_stream(FILE *fin, FILE *fout, const uint8_t key[BLOCK_BYTES], size_t total, int quiet) {
     uint8_t iv[IV_SIZE];
     if (RAND_bytes(iv, IV_SIZE) != 1) return;
     fwrite(iv, 1, IV_SIZE, fout);
@@ -274,7 +274,7 @@ static void cbc_decrypt_stream(FILE *fin, FILE *fout, const uint8_t key[BLOCK_BY
         fprintf(stderr, "\rDecrypting (CBC): 100%% (%.2f MB/s)   \n", speed);
     }
 }
-
+*/
 static void ctr_encrypt_stream(FILE *fin, FILE *fout, const uint8_t key[BLOCK_BYTES], size_t total, int quiet) {
     uint8_t nonce[8];
     if (RAND_bytes(nonce, 8) != 1) return;
@@ -518,9 +518,34 @@ static void ctr_decrypt_mmap(const char *infile, const char *outfile, const uint
 int main(int argc, char **argv) {
     init_lut();
 
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            printf("Cube512 — 512-bit block cipher\n\n");
+            printf("Usage: %s --in <source> --key <key> --action encrypt|decrypt [options]\n\n", argv[0]);
+            printf("Required:\n");
+            printf("  --in <source>       Input: file, folder/, text, or - (stdin)\n");
+            printf("  --key <key>         Key (file path or text)\n");
+            printf("  --action <action>   encrypt or decrypt\n\n");
+            printf("Options:\n");
+            printf("  --out <file>        Output file (required for binary mode)\n");
+            printf("  --threads <N>       Threads for CTR mode (default: 1)\n");
+            printf("  --compress          Compress with LZ4 (only for folders)\n");
+            printf("  --quiet             Suppress progress output\n");
+            printf("  --help, -h          Show this help\n\n");
+            printf("Examples:\n");
+            printf("  %s --in secret.txt --key my.key --action encrypt --out secret.enc\n", argv[0]);
+            printf("  %s --in \"hello world\" --key pass --action encrypt\n", argv[0]);
+            printf("  %s --in ./docs/ --key key.txt --action encrypt --out docs.enc --compress\n", argv[0]);
+            return 0;
+        }
+    }
+
     const char *input = NULL, *key_str = NULL, *action = NULL, *output = NULL;
-    int compress = 0, quiet = 0, mode_cbc = 1;
+    int compress = 0, quiet = 0;
     int threads = 1;
+
+
+
     static struct option long_opts[] = {
         {"in", required_argument, 0, 'i'},
         {"key", required_argument, 0, 'k'},
@@ -528,12 +553,11 @@ int main(int argc, char **argv) {
         {"out", required_argument, 0, 'o'},
         {"compress", no_argument, 0, 'z'},
         {"quiet", no_argument, 0, 'q'},
-        {"mode", required_argument, 0, 'm'},
         {"threads", required_argument, 0, 't'},
         {0,0,0,0}
     };
     int c;
-    while ((c = getopt_long(argc, argv, "i:k:a:o:zqm:t:", long_opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "i:k:a:o:zq:t:", long_opts, NULL)) != -1) {
         switch (c) {
             case 'i': input = optarg; break;
             case 'k': key_str = optarg; break;
@@ -541,32 +565,22 @@ int main(int argc, char **argv) {
             case 'o': output = optarg; break;
             case 'z': compress = 1; break;
             case 'q': quiet = 1; break;
-            case 'm': mode_cbc = (strcmp(optarg, "cbc") == 0); break;
             case 't': threads = atoi(optarg); if (threads < 1) threads = 1; break;
             default: return 1;
         }
     }
     if (!input || !key_str || !action) {
-        fprintf(stderr, "Usage: %s --in <source> --key <key> --action encrypt|decrypt [--out <file>] [--compress] [--mode cbc|ctr] [--threads N] [--quiet]\n", argv[0]);
+        fprintf(stderr, "Usage: %s --in <source> --key <key> --action encrypt|decrypt [--out <file>] [--compress] [--threads N] [--quiet]\n", argv[0]);
         return 1;
     }
 
     // Определяем тип входа
-    size_t in_len = strlen(input);
-    int is_quoted = (in_len >= 2 && (input[0] == '"' || input[0] == '\'') && input[in_len-1] == input[0]);
-    char *unquoted_input = NULL;
     const char *real_input = input;
-    if (is_quoted) {
-        unquoted_input = strdup(input);
-        unquoted_input[in_len-1] = '\0';
-        real_input = unquoted_input + 1;
-    }
-
     int is_stdin = (strcmp(real_input, "-") == 0);
-    int is_dir = (!is_quoted && !is_stdin && real_input[strlen(real_input)-1] == '/');
-    int is_glob = (!is_quoted && !is_stdin && !is_dir && (strchr(real_input, '*') || strchr(real_input, '?')));
-    int is_file = (!is_quoted && !is_stdin && !is_dir && !is_glob);
-    int is_text = is_quoted;
+    int is_dir = (!is_stdin && real_input[strlen(real_input)-1] == '/');
+    int is_glob = (!is_stdin && !is_dir && (strchr(real_input, '*') || strchr(real_input, '?')));
+    int is_file = (!is_stdin && !is_dir && !is_glob);
+    int is_text = 0;
 
     if (is_file) {
         struct stat st;
@@ -589,7 +603,6 @@ int main(int argc, char **argv) {
         if (stat(key_str, &st) == 0 && S_ISREG(st.st_mode)) {
             if (!read_key_from_file(key_str, key)) {
                 fprintf(stderr, "Cannot read key file\n");
-                if (unquoted_input) free(unquoted_input);
                 return 1;
             }
         } else {
@@ -611,7 +624,6 @@ int main(int argc, char **argv) {
             if (!bin || bin_len != BLOCK_BYTES) {
                 fprintf(stderr, "Invalid base64 input\n");
                 free(bin);
-                if (unquoted_input) free(unquoted_input);
                 return 1;
             }
             uint8_t dec[BLOCK_BYTES];
@@ -619,7 +631,6 @@ int main(int argc, char **argv) {
             if (!ecb_decrypt(bin, dec, &dec_len, key)) {
                 fprintf(stderr, "Decryption failed\n");
                 free(bin);
-                if (unquoted_input) free(unquoted_input);
                 return 1;
             }
             fwrite(dec, 1, dec_len, stdout);
@@ -628,14 +639,12 @@ int main(int argc, char **argv) {
         } else {
             fprintf(stderr, "Unknown action\n");
         }
-        if (unquoted_input) free(unquoted_input);
         return 0;
     }
 
     // Для нетекстовых режимов нужен --out
     if (!output) {
         fprintf(stderr, "Error: --out is required for file/directory/glob/stream mode\n");
-        if (unquoted_input) free(unquoted_input);
         return 1;
     }
 
@@ -644,57 +653,52 @@ int main(int argc, char **argv) {
         if (is_stdin) {
             FILE *fin = stdin;
             FILE *fout = (strcmp(output, "-") == 0) ? stdout : fopen(output, "wb");
-            if (!fout) { perror("fopen out"); if (unquoted_input) free(unquoted_input); return 1; }
-            if (mode_cbc) cbc_encrypt_stream(fin, fout, key, 0, quiet);
-            else ctr_encrypt_stream(fin, fout, key, 0, quiet);
+            if (!fout) { perror("fopen out"); return 1;}
+            ctr_encrypt_stream(fin, fout, key, 0, quiet);
             if (fout != stdout) fclose(fout);
         } else if (is_file) {
             // === ОДИНОЧНЫЙ ФАЙЛ — шифруем напрямую ===
             struct stat st;
-            if (stat(real_input, &st) != 0) { perror("stat input"); if (unquoted_input) free(unquoted_input); return 1; }
-            if (!mode_cbc && threads > 1) {
+            if (stat(real_input, &st) != 0) { perror("stat input");  return 1; }
+            if (threads > 1) {
                 ctr_encrypt_mmap(real_input, output, key, threads, quiet);
-            } else if (!mode_cbc) {
                 FILE *fin = fopen(real_input, "rb");
                 FILE *fout = fopen(output, "wb");
-                if (!fin || !fout) { perror("fopen"); if (unquoted_input) free(unquoted_input); return 1; }
+                if (!fin || !fout) { perror("fopen"); return 1; }
                 ctr_encrypt_stream(fin, fout, key, st.st_size, quiet);
                 fclose(fin); fclose(fout);
             } else {
                 FILE *fin = fopen(real_input, "rb");
                 FILE *fout = fopen(output, "wb");
-                if (!fin || !fout) { perror("fopen"); if (unquoted_input) free(unquoted_input); return 1; }
-                cbc_encrypt_stream(fin, fout, key, st.st_size, quiet);
+                if (!fin || !fout) { perror("fopen"); return 1; }
+                ctr_encrypt_stream(fin, fout, key, st.st_size, quiet);
                 fclose(fin); fclose(fout);
             }
         } else {
             // === ПАПКА ИЛИ МАСКА — создаём TAR ===
             char tmp_tar[] = "/tmp/cube_tar_XXXXXX";
             int fd = mkstemp(tmp_tar);
-            if (fd < 0) { perror("mkstemp"); if (unquoted_input) free(unquoted_input); return 1; }
+            if (fd < 0) { perror("mkstemp"); return 1; }
             close(fd);
             if (!create_tar_from_path(real_input, tmp_tar, is_dir || is_glob, compress)) {
                 fprintf(stderr, "Failed to create tar\n");
                 unlink(tmp_tar);
-                if (unquoted_input) free(unquoted_input);
                 return 1;
             }
             struct stat st;
             stat(tmp_tar, &st);
             size_t total = st.st_size;
-            if (!mode_cbc && threads > 1 && !is_dir && !is_glob && !is_stdin && total > 0) {
+            if (threads > 1 && !is_dir && !is_glob && !is_stdin && total > 0) {
                 // Многопоточный CTR (mmap)
                 ctr_encrypt_mmap(tmp_tar, output, key, threads, quiet);
                 unlink(tmp_tar);
-                if (unquoted_input) free(unquoted_input);
                 return 0;
             } else {
                 // Однопоточный режим
                 FILE *fin = fopen(tmp_tar, "rb");
                 FILE *fout = fopen(output, "wb");
-                if (!fin || !fout) { perror("fopen"); unlink(tmp_tar); if (unquoted_input) free(unquoted_input); return 1; }
-                if (mode_cbc) cbc_encrypt_stream(fin, fout, key, total, quiet);
-                else ctr_encrypt_stream(fin, fout, key, total, quiet);
+                if (!fin || !fout) { perror("fopen"); unlink(tmp_tar); return 1; }
+                ctr_encrypt_stream(fin, fout, key, total, quiet);
                 fclose(fin); fclose(fout);
                 unlink(tmp_tar);
             }
@@ -703,38 +707,27 @@ int main(int argc, char **argv) {
         if (is_stdin) {
             FILE *fin = stdin;
             FILE *fout = (strcmp(output, "-") == 0) ? stdout : fopen(output, "wb");
-            if (!fout) { perror("fopen out"); if (unquoted_input) free(unquoted_input); return 1; }
-            if (mode_cbc) cbc_decrypt_stream(fin, fout, key, 0, quiet);
-            else ctr_decrypt_stream(fin, fout, key, 0, quiet);
+            if (!fout) { perror("fopen out"); return 1; }
+            ctr_decrypt_stream(fin, fout, key, 0, quiet);
             if (fout != stdout) fclose(fout);
         } else {
             // Для расшифровки сначала определим, нужно ли многопоточность
             struct stat st;
             stat(real_input, &st);
             size_t total = st.st_size;
-            if (!mode_cbc && threads > 1 && !is_dir && !is_glob && !is_stdin && total >= 8) {
+            if (threads > 1 && !is_dir && !is_glob && !is_stdin && total >= 8) {
                 // Многопоточная расшифровка CTR (mmap)
                 ctr_decrypt_mmap(real_input, output, key, threads, quiet);
             } else {
-                // Однопоточная расшифровка (CBC или CTR)
+                // Однопоточная расшифровка
                 char tmp_dec[] = "/tmp/cube_dec_XXXXXX";
                 int fd = mkstemp(tmp_dec);
-                if (fd < 0) { perror("mkstemp"); if (unquoted_input) free(unquoted_input); return 1; }
+                if (fd < 0) { perror("mkstemp"); return 1; }
                 close(fd);
                 FILE *fin = fopen(real_input, "rb");
                 FILE *ftmp = fopen(tmp_dec, "wb");
-                if (!fin || !ftmp) { perror("fopen"); unlink(tmp_dec); if (unquoted_input) free(unquoted_input); return 1; }
-                if (mode_cbc && (total < IV_SIZE || (total - IV_SIZE) % BLOCK_BYTES != 0)) {
-                    fprintf(stderr, "Invalid ciphertext size for CBC\n");
-                    fclose(fin); fclose(ftmp); unlink(tmp_dec);
-                    if (unquoted_input) free(unquoted_input);
-                    return 1;
-                }
-                if (mode_cbc) {
-                    cbc_decrypt_stream(fin, ftmp, key, total, quiet);
-                } else {
-                    ctr_decrypt_stream(fin, ftmp, key, total, quiet);
-                }
+                if (!fin || !ftmp) { perror("fopen"); unlink(tmp_dec); return 1; }
+                ctr_decrypt_stream(fin, ftmp, key, total, quiet);
                 fclose(fin); fclose(ftmp);
                 // Проверка TAR
                 FILE *ftest = fopen(tmp_dec, "rb");
@@ -746,7 +739,6 @@ int main(int argc, char **argv) {
                     if (mkdir(output, 0755) != 0 && errno != EEXIST) {
                         perror("mkdir");
                         unlink(tmp_dec);
-                        if (unquoted_input) free(unquoted_input);
                         return 1;
                     }
                     FILE *ftardata = fopen(tmp_dec, "rb");
@@ -781,10 +773,7 @@ int main(int argc, char **argv) {
         }
     } else {
         fprintf(stderr, "Unknown action\n");
-        if (unquoted_input) free(unquoted_input);
         return 1;
     }
-
-    if (unquoted_input) free(unquoted_input);
     return 0;
 }
