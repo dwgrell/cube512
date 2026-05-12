@@ -28,7 +28,6 @@ void init_lut(void);
 void encrypt_block(const uint8_t plain[BLOCK_BYTES], const uint8_t key[BLOCK_BYTES], uint8_t cipher[BLOCK_BYTES]);
 void decrypt_block(const uint8_t cipher[BLOCK_BYTES], const uint8_t key[BLOCK_BYTES], uint8_t plain[BLOCK_BYTES]);
 
-// ---------- Вспомогательные функции ----------
 static void derive_key(const void *data, size_t len, uint8_t key[BLOCK_BYTES]) {
     uint8_t hash[32];
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
@@ -103,7 +102,6 @@ static uint8_t *base64_decode(const char *str, size_t *out_len) {
     return data;
 }
 
-// ---------- TAR создание ----------
 static int create_tar_from_path(const char *path, const char *outfile, int is_dir, int compress) {
     struct archive *a = archive_write_new();
     archive_write_set_format_pax_restricted(a);
@@ -201,7 +199,6 @@ static int extract_tar_from_mem(const uint8_t *data, size_t len, const char *out
     return 1;
 }
 
-// ---------- CBC и CTR (однопоточные) ----------
 /*static void cbc_encrypt_stream(FILE *fin, FILE *fout, const uint8_t key[BLOCK_BYTES], size_t total, int quiet) {
     uint8_t iv[IV_SIZE];
     if (RAND_bytes(iv, IV_SIZE) != 1) return;
@@ -275,6 +272,7 @@ static void cbc_decrypt_stream(FILE *fin, FILE *fout, const uint8_t key[BLOCK_BY
     }
 }
 */
+
 static void ctr_encrypt_stream(FILE *fin, FILE *fout, const uint8_t key[BLOCK_BYTES], size_t total, int quiet) {
     uint8_t nonce[8];
     if (RAND_bytes(nonce, 8) != 1) return;
@@ -295,7 +293,6 @@ static void ctr_encrypt_stream(FILE *fin, FILE *fout, const uint8_t key[BLOCK_BY
         encrypt_block(counter_block, key, keystream);
         for (size_t i = 0; i < n; i++) data[i] ^= keystream[i];
         fwrite(data, 1, n, fout);
-        // инкремент 64-битного счётчика (big-endian)
         for (int i = 15; i >= 0; i--) {
             if (++ctr[i] != 0) break;
         }
@@ -316,6 +313,7 @@ static void ctr_encrypt_stream(FILE *fin, FILE *fout, const uint8_t key[BLOCK_BY
         fprintf(stderr, "\rEncrypting (CTR): 100%% (%.2f MB/s)   \n", speed);
     }
 }
+
 static void ctr_decrypt_stream(FILE *fin, FILE *fout, const uint8_t key[BLOCK_BYTES], size_t total, int quiet) {
     uint8_t nonce[8];
     if (fread(nonce, 1, 8, fin) != 8) return;
@@ -326,24 +324,17 @@ static void ctr_decrypt_stream(FILE *fin, FILE *fout, const uint8_t key[BLOCK_BY
     uint8_t keystream[BLOCK_BYTES];
     uint8_t data[BLOCK_BYTES];
     size_t processed = 0;
-    // Размер данных без nonce
     size_t data_total = total - 8;
     if (data_total < 0) return;
     clock_t start = clock();
-
     while (processed < data_total) {
         size_t n = fread(data, 1, BLOCK_BYTES, fin);
         if (n == 0) break;
-        if (n < BLOCK_BYTES) {
-            // Если последний блок меньше 64 байт, то дополняем нулями? CTR не использует паддинг, но мы будем шифровать только реальные байты.
-            // В CTR режиме можно шифровать последний блок любой длины, XOR применяется только к n байтам.
-        }
         memset(counter_block, 0, BLOCK_BYTES);
         memcpy(counter_block, ctr, 16);
         encrypt_block(counter_block, key, keystream);
         for (size_t i = 0; i < n; i++) data[i] ^= keystream[i];
         fwrite(data, 1, n, fout);
-        // increment counter (64-bit, big-endian)
         for (int i = 15; i >= 0; i--) {
             if (++ctr[i] != 0) break;
         }
@@ -361,15 +352,14 @@ static void ctr_decrypt_stream(FILE *fin, FILE *fout, const uint8_t key[BLOCK_BY
         fprintf(stderr, "\rDecrypting (CTR): 100%% (%.2f MB/s)   \n", speed);
     }
 }
-// ---------- Многопоточный CTR через mmap ----------
 
 typedef struct {
     uint8_t *data;
     size_t start;
     size_t end;
     const uint8_t *key;
-    uint8_t nonce[8];          // копия nonce
-    uint64_t start_block;      // номер первого блока для этого потока
+    uint8_t nonce[8];
+    uint64_t start_block;
     atomic_size_t *processed;
     int quiet;
 } ctr_thread_arg;
@@ -378,8 +368,7 @@ static void *ctr_mmap_worker(void *arg) {
     ctr_thread_arg *ta = (ctr_thread_arg*)arg;
     uint8_t ctr[16];
     memset(ctr, 0, 16);
-    memcpy(ctr, ta->nonce, 8);                     // nonce в байты 0..7
-    // Устанавливаем номер блока в байты 8..15 (big-endian)
+    memcpy(ctr, ta->nonce, 8);
     uint64_t block = ta->start_block;
     for (int i = 15; i >= 8; i--) {
         ctr[i] = block & 0xFF;
@@ -397,7 +386,6 @@ static void *ctr_mmap_worker(void *arg) {
         for (size_t i = 0; i < n; i++) {
             ta->data[pos + i] ^= keystream[i];
         }
-        // Инкремент 64-битного номера блока (байты 8..15)
         for (int i = 15; i >= 8; i--) {
             if (++ctr[i] != 0) break;
         }
@@ -406,7 +394,7 @@ static void *ctr_mmap_worker(void *arg) {
     }
     return NULL;
 }
-// ---------- ECB для текста ----------
+
 static void ecb_encrypt(const uint8_t *in, size_t in_len, uint8_t out[BLOCK_BYTES], const uint8_t key[BLOCK_BYTES]) {
     uint8_t padded[BLOCK_BYTES];
     memcpy(padded, in, in_len);
@@ -424,7 +412,6 @@ static int ecb_decrypt(const uint8_t in[BLOCK_BYTES], uint8_t *out, size_t *out_
     return 1;
 }
 
-// Многопоточное шифрование / расшифровка
 static void ctr_encrypt_mmap(const char *infile, const char *outfile, const uint8_t key[BLOCK_BYTES], int threads, int quiet) {
     int fd_in = open(infile, O_RDONLY);
     if (fd_in < 0) { perror("open input"); return; }
@@ -464,6 +451,7 @@ static void ctr_encrypt_mmap(const char *infile, const char *outfile, const uint
     free(threads_arr);
     free(args);
 }
+
 static void ctr_decrypt_mmap(const char *infile, const char *outfile, const uint8_t key[BLOCK_BYTES], int threads, int quiet) {
     int fd_in = open(infile, O_RDONLY);
     if (fd_in < 0) { perror("open input"); return; }
@@ -471,25 +459,19 @@ static void ctr_decrypt_mmap(const char *infile, const char *outfile, const uint
     fstat(fd_in, &st);
     size_t file_size = st.st_size;
     if (file_size < 8) { close(fd_in); return; }
-    // Отображаем весь файл (включая nonce)
     uint8_t *data = mmap(NULL, file_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd_in, 0);
     if (data == MAP_FAILED) { perror("mmap"); close(fd_in); return; }
-    
     uint8_t nonce[8];
-    memcpy(nonce, data, 8);   // извлекаем nonce
+    memcpy(nonce, data, 8);
     size_t data_size = file_size - 8;
-    
-    // Выходной файл
     FILE *fout = fopen(outfile, "wb");
     if (!fout) { perror("fopen out"); munmap(data, file_size); close(fd_in); return; }
-    
     atomic_size_t total_processed = 0;
     pthread_t *threads_arr = malloc(threads * sizeof(pthread_t));
     ctr_thread_arg *args = malloc(threads * sizeof(ctr_thread_arg));
     size_t chunk = (data_size + threads - 1) / threads;
-    
     for (int i = 0; i < threads; i++) {
-        args[i].data = data + 8;               // данные без nonce
+        args[i].data = data + 8;
         args[i].start = i * chunk;
         args[i].end = (i+1) * chunk;
         if (args[i].end > data_size) args[i].end = data_size;
@@ -500,13 +482,9 @@ static void ctr_decrypt_mmap(const char *infile, const char *outfile, const uint
         args[i].quiet = quiet;
         pthread_create(&threads_arr[i], NULL, ctr_mmap_worker, &args[i]);
     }
-    
-    // Ожидание потоков (прогресс можно добавить по желанию)
     for (int i = 0; i < threads; i++) {
         pthread_join(threads_arr[i], NULL);
     }
-    
-    // Записываем расшифрованные данные
     fwrite(data + 8, 1, data_size, fout);
     fclose(fout);
     munmap(data, file_size);
@@ -516,6 +494,7 @@ static void ctr_decrypt_mmap(const char *infile, const char *outfile, const uint
 }
 
 int main(int argc, char **argv) {
+
     init_lut();
 
     for (int i = 1; i < argc; i++) {
@@ -544,8 +523,6 @@ int main(int argc, char **argv) {
     int compress = 0, quiet = 0;
     int threads = 1;
 
-
-
     static struct option long_opts[] = {
         {"in", required_argument, 0, 'i'},
         {"key", required_argument, 0, 'k'},
@@ -556,6 +533,7 @@ int main(int argc, char **argv) {
         {"threads", required_argument, 0, 't'},
         {0,0,0,0}
     };
+
     int c;
     while ((c = getopt_long(argc, argv, "i:k:a:o:zq:t:", long_opts, NULL)) != -1) {
         switch (c) {
@@ -569,12 +547,12 @@ int main(int argc, char **argv) {
             default: return 1;
         }
     }
+
     if (!input || !key_str || !action) {
         fprintf(stderr, "Usage: %s --in <source> --key <key> --action encrypt|decrypt [--out <file>] [--compress] [--threads N] [--quiet]\n", argv[0]);
         return 1;
     }
 
-    // Определяем тип входа
     const char *real_input = input;
     int is_stdin = (strcmp(real_input, "-") == 0);
     int is_dir = (!is_stdin && real_input[strlen(real_input)-1] == '/');
@@ -590,7 +568,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Получаем ключ
     uint8_t key[BLOCK_BYTES];
     if (key_str[0] == '"' || key_str[0] == '\'') {
         size_t klen = strlen(key_str);
@@ -610,7 +587,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Текстовый режим
     if (is_text) {
         if (strcmp(action, "encrypt") == 0) {
             uint8_t encrypted[BLOCK_BYTES];
@@ -642,13 +618,11 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    // Для нетекстовых режимов нужен --out
     if (!output) {
         fprintf(stderr, "Error: --out is required for file/directory/glob/stream mode\n");
         return 1;
     }
 
-    // ========== Шифрование ==========
     if (strcmp(action, "encrypt") == 0) {
         if (is_stdin) {
             FILE *fin = stdin;
@@ -657,7 +631,6 @@ int main(int argc, char **argv) {
             ctr_encrypt_stream(fin, fout, key, 0, quiet);
             if (fout != stdout) fclose(fout);
         } else if (is_file) {
-            // === ОДИНОЧНЫЙ ФАЙЛ — шифруем напрямую ===
             struct stat st;
             if (stat(real_input, &st) != 0) { perror("stat input");  return 1; }
             if (threads > 1) {
@@ -675,7 +648,6 @@ int main(int argc, char **argv) {
                 fclose(fin); fclose(fout);
             }
         } else {
-            // === ПАПКА ИЛИ МАСКА — создаём TAR ===
             char tmp_tar[] = "/tmp/cube_tar_XXXXXX";
             int fd = mkstemp(tmp_tar);
             if (fd < 0) { perror("mkstemp"); return 1; }
@@ -689,12 +661,10 @@ int main(int argc, char **argv) {
             stat(tmp_tar, &st);
             size_t total = st.st_size;
             if (threads > 1 && !is_dir && !is_glob && !is_stdin && total > 0) {
-                // Многопоточный CTR (mmap)
                 ctr_encrypt_mmap(tmp_tar, output, key, threads, quiet);
                 unlink(tmp_tar);
                 return 0;
             } else {
-                // Однопоточный режим
                 FILE *fin = fopen(tmp_tar, "rb");
                 FILE *fout = fopen(output, "wb");
                 if (!fin || !fout) { perror("fopen"); unlink(tmp_tar); return 1; }
@@ -703,7 +673,7 @@ int main(int argc, char **argv) {
                 unlink(tmp_tar);
             }
         }
-    } else if (strcmp(action, "decrypt") == 0) { // ========== Расшифровка ==========
+    } else if (strcmp(action, "decrypt") == 0) {
         if (is_stdin) {
             FILE *fin = stdin;
             FILE *fout = (strcmp(output, "-") == 0) ? stdout : fopen(output, "wb");
@@ -711,15 +681,12 @@ int main(int argc, char **argv) {
             ctr_decrypt_stream(fin, fout, key, 0, quiet);
             if (fout != stdout) fclose(fout);
         } else {
-            // Для расшифровки сначала определим, нужно ли многопоточность
             struct stat st;
             stat(real_input, &st);
             size_t total = st.st_size;
             if (threads > 1 && !is_dir && !is_glob && !is_stdin && total >= 8) {
-                // Многопоточная расшифровка CTR (mmap)
                 ctr_decrypt_mmap(real_input, output, key, threads, quiet);
             } else {
-                // Однопоточная расшифровка
                 char tmp_dec[] = "/tmp/cube_dec_XXXXXX";
                 int fd = mkstemp(tmp_dec);
                 if (fd < 0) { perror("mkstemp"); return 1; }
@@ -729,7 +696,6 @@ int main(int argc, char **argv) {
                 if (!fin || !ftmp) { perror("fopen"); unlink(tmp_dec); return 1; }
                 ctr_decrypt_stream(fin, ftmp, key, total, quiet);
                 fclose(fin); fclose(ftmp);
-                // Проверка TAR
                 FILE *ftest = fopen(tmp_dec, "rb");
                 uint8_t magic[257];
                 size_t n = fread(magic, 1, 257, ftest);
